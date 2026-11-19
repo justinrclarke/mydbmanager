@@ -1,0 +1,20 @@
+[package]
+name = "mydb-desktop"
+description = "MyDB Manager — desktop app for managing, dumping, restoring and transferring databases"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "mydb_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+mydb-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true

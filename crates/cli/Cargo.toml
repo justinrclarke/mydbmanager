@@ -1,0 +1,21 @@
+[package]
+name = "mydb"
+description = "CLI for managing, dumping, restoring and transferring PostgreSQL, MySQL and SQLite databases"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "mydb"
+path = "src/main.rs"
+
+[dependencies]
+mydb-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+comfy-table.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

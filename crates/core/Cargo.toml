@@ -1,0 +1,20 @@
+[package]
+name = "mydb-core"
+description = "Provider-agnostic database management engine: introspection, dump/restore, transfer and diff for PostgreSQL, MySQL and SQLite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+directories.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+url.workspace = true
