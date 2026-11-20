@@ -84,6 +84,24 @@ impl ProviderKind {
             ProviderKind::Sqlite => 0,
         }
     }
+
+    /// Quote an identifier with the engine's delimiter.
+    pub fn quote_ident(self, ident: &str) -> String {
+        match self {
+            ProviderKind::Mysql => format!("`{}`", ident.replace('`', "``")),
+            ProviderKind::Postgres | ProviderKind::Sqlite => {
+                format!("\"{}\"", ident.replace('"', "\"\""))
+            }
+        }
+    }
+
+    /// Schema-qualified quoted name (`schema.table`), or just the name on SQLite.
+    pub fn qualify(self, schema: &str, name: &str) -> String {
+        match self {
+            ProviderKind::Sqlite => self.quote_ident(name),
+            _ => format!("{}.{}", self.quote_ident(schema), self.quote_ident(name)),
+        }
+    }
 }
 
 impl fmt::Display for ProviderKind {
@@ -156,6 +174,9 @@ pub trait DatabaseProvider: Send + Sync {
 
     /// Run an ad-hoc query and return its full result set.
     async fn execute_query(&self, sql: &str) -> Result<QueryResult>;
+
+    /// Human-readable server name and version (used by `mydb conn test`).
+    async fn server_version(&self) -> Result<String>;
 }
 
 #[cfg(test)]
@@ -195,5 +216,16 @@ mod tests {
         assert!(ProviderKind::Postgres.capabilities().sequences);
         assert!(!ProviderKind::Mysql.capabilities().sequences);
         assert!(!ProviderKind::Sqlite.capabilities().sequences);
+    }
+
+    #[test]
+    fn quotes_idents_per_engine() {
+        assert_eq!(ProviderKind::Postgres.quote_ident("a\"b"), "\"a\"\"b\"");
+        assert_eq!(ProviderKind::Mysql.quote_ident("a`b"), "`a``b`");
+        assert_eq!(ProviderKind::Sqlite.qualify("main", "users"), "\"users\"");
+        assert_eq!(
+            ProviderKind::Postgres.qualify("public", "users"),
+            "\"public\".\"users\""
+        );
     }
 }

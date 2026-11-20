@@ -99,27 +99,23 @@ when unset. Unit tests must not require network/servers.
 
 ## Current state (update as you work)
 
-- **Phase 0 done**: workspace, CI (3-OS matrix), core type skeletons, CLI
-  `conn add/list/rm`, desktop shell. Commit `1d33678`.
-- **Phase 1 in progress**: providers for all three engines are written
-  (introspection + query execution + value mapping) but need: compile
-  fixes, integration tests against Docker servers, CLI `conn test`/`ls`/
-  `query` wiring, then SSH tunnels (russh) and keyring secrets.
+- **Phases 0–6 implemented**: core providers + SSH + keyring, native/hybrid
+  dump-restore, transfer/diff/verify, CLI surface, desktop browse/query/
+  transfer/diff UI, presets, migration export, CI DB services, release
+  workflow. Remaining polish: host-key verification for SSH, MySQL
+  `SHOW CREATE FUNCTION` argument parsing, live `tauri-driver` runs.
 - Toolchain notes: Rust 1.95, Node 18 locally (Vite 6 constraint — do NOT
   bump to Vite 7 unless Node ≥ 20.19 is guaranteed), pg_dump 18 +
   mysqldump available on the maintainer's macOS machine.
 
 ## Known gaps / TODO markers
 
-- `conn/mod.rs`: passwords stored plaintext in TOML until keyring lands
-  (search `TODO(Phase 1)`).
-- MySQL `Function.args` is empty — needs `SHOW CREATE FUNCTION` parsing
-  (Phase 2).
+- SSH `check_server_key` currently accepts any host key (document for
+  users; known_hosts store is the next hardening step).
+- MySQL `Function.args` is empty — needs `SHOW CREATE FUNCTION` parsing.
 - MySQL CHECK constraints: silently skipped on engines without
   `information_schema.check_constraints` (error 1109).
-- SQLite `row_estimate` is None (no planner stats); fine for Phase 1.
-- `TransferOptions.batch_size` default 0 means "engine decides" (apply a
-  real default like 5000 in the Phase 3 orchestrator).
+- SQLite `row_estimate` is None (no planner stats).
 
 ## For AI agents specifically
 

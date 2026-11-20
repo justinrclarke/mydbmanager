@@ -63,16 +63,16 @@ mydb conn add prod --url postgres://user:pass@host:5432/app --env prod
 mydb conn add dev --url postgres://user:pass@localhost:5432/app --env dev
 mydb conn list
 
-mydb ls prod --schema public                 # Phase 1
-mydb query dev "SELECT count(*) FROM users"  # Phase 1
+mydb ls prod --schema public
+mydb query dev "SELECT count(*) FROM users"
 
-mydb dump prod -o prod.dump --format custom  # Phase 2
-mydb restore prod.dump --into dev --clean    # Phase 2
+mydb dump prod -o prod.dump --format custom
+mydb restore prod.dump --into dev --clean
 
-mydb transfer prod dev --mode clean-recreate --dry-run   # Phase 3
-mydb transfer prod dev --mode clean-recreate -y          # Phase 3
-mydb diff prod staging --sql                             # Phase 3
-mydb verify prod dev                                     # Phase 3
+mydb transfer prod dev --mode clean-recreate --dry-run
+mydb transfer prod dev --mode clean-recreate -y
+mydb diff prod staging --sql
+mydb verify prod dev
 ```
 
 Transfer modes:
@@ -115,12 +115,12 @@ npm run tauri icon app-icon.png
 | Phase | Deliverable | Status |
 |---|---|---|
 | 0 | Workspace scaffold, CI matrix (macOS/Windows/Linux) | ✅ |
-| 1 | Connections (profiles, TLS, SSH tunnels), introspection (PG/MySQL/SQLite), `mydb conn/ls/query` | ⏳ |
-| 2 | Hybrid dump/restore + native fallback + verification; `mydb dump/restore/verify` | |
-| 3 | Transfer + diff engines; `mydb transfer/diff` with dry-run + progress events | |
-| 4 | Desktop: sidebar, schema tree, data grid, SQL editor | |
-| 5 | Desktop: transfer wizard, diff viewer, verification reports | |
-| 6 | Migration export, transfer presets, tool sidecar bundling, release packaging (.dmg/.msi/.deb/.rpm/.AppImage) | |
+| 1 | Connections (profiles, TLS, SSH tunnels), introspection (PG/MySQL/SQLite), `mydb conn/ls/query` | ✅ |
+| 2 | Hybrid dump/restore + native fallback + verification; `mydb dump/restore/verify` | ✅ |
+| 3 | Transfer + diff engines; `mydb transfer/diff` with dry-run + progress events | ✅ |
+| 4 | Desktop: sidebar, schema tree, data grid, SQL editor | ✅ |
+| 5 | Desktop: transfer wizard, diff viewer, verification reports | ✅ |
+| 6 | Migration export, transfer presets, tool sidecar bundling, release packaging (.dmg/.msi/.deb/.rpm/.AppImage) | ✅ |
 
 ## License
 

@@ -69,7 +69,7 @@ mydbmanager/
 | Database drivers | **sqlx 0.8** (runtime-tokio, rustls TLS) | Async, pure Rust, all three engines. |
 | SSH tunnels | **russh** (pure Rust) | Identical behavior on all three OSes, no OpenSSH dependency. (Later in Phase 1.) |
 | Config sharing | `connections.toml` in platform config dir | `~/.config/mydb` (Linux), `~/Library/Application Support/mydb` (macOS), `%APPDATA%\mydb` (Windows); `MYDB_CONFIG_DIR`/`MYDB_CONFIG` overrides for tests. CLI and desktop see the same profiles. |
-| Secrets | OS keyring via `keyring` crate (Phase 1), encrypted-file fallback | Today passwords live in the TOML — flagged as TODO. |
+| Secrets | OS keyring via `keyring` crate, ChaCha20-Poly1305 file fallback | Passwords are stripped from `connections.toml` on save. |
 | Progress reporting | One `TransferEvent` type over `tokio::sync::broadcast` | CLI renders progress bars (indicatif); Tauri forwards the same events to the UI. |
 | Desktop grid/editor | TanStack Virtual + CodeMirror 6 (Phase 4) | Virtualized data grid; SQL completion sourced from live `SchemaCatalog`. |
 

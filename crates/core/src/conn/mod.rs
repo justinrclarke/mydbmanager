@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{MyDbError, Result};
 use crate::provider::ProviderKind;
+use crate::transfer::TransferMode;
+
+pub mod secrets;
 
 /// Environment label for a connection, driving UI badges and safety checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -118,7 +121,7 @@ pub struct ConnectionProfile {
     /// User name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
-    /// Password. TODO(Phase 1): move to the OS keyring via `keyring`.
+    /// Password. Stored in the OS keyring / encrypted file, never written to TOML.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
     /// Database name, or file path for SQLite.
@@ -210,6 +213,27 @@ impl ConnectionProfile {
     }
 }
 
+/// Split a URL into (url without password, optional password).
+pub fn split_url_password(url: &str) -> (String, Option<String>) {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return (url.to_string(), None);
+    };
+    let password = parsed.password().map(str::to_string);
+    if password.is_some() {
+        let _ = parsed.set_password(None);
+    }
+    (parsed.to_string(), password)
+}
+
+/// Inject `password` into a URL that currently has none.
+pub fn inject_url_password(url: &str, password: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return url.to_string();
+    };
+    let _ = parsed.set_password(Some(password));
+    parsed.to_string()
+}
+
 /// Replace the password component of a URL with `***`.
 pub fn mask_url_password(url: &str) -> String {
     let Some(scheme_end) = url.find("://") else {
@@ -226,11 +250,44 @@ pub fn mask_url_password(url: &str) -> String {
     format!("{scheme}{}:***@{}", &credentials[..colon], &rest[at + 1..])
 }
 
+/// A saved transfer preset (one-click prod → dev).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct TransferPreset {
+    /// Preset name.
+    pub name: String,
+    /// Source profile name.
+    pub source: String,
+    /// Target profile name.
+    pub target: String,
+    /// Transfer mode.
+    pub mode: TransferMode,
+    /// Tables to skip.
+    pub exclude_tables: Vec<String>,
+    /// Copy schema only.
+    pub schema_only: bool,
+}
+
+impl Default for TransferPreset {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            source: String::new(),
+            target: String::new(),
+            mode: TransferMode::CleanRecreate,
+            exclude_tables: Vec::new(),
+            schema_only: false,
+        }
+    }
+}
+
 /// On-disk layout of `connections.toml`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ConfigFile {
     #[serde(default)]
     connections: Vec<ConnectionProfile>,
+    #[serde(default)]
+    presets: Vec<TransferPreset>,
 }
 
 /// Reads and writes the shared connection profile store.
@@ -238,6 +295,7 @@ struct ConfigFile {
 pub struct ConfigStore {
     path: PathBuf,
     file: ConfigFile,
+    secrets: secrets::Store,
 }
 
 /// Default config path: `$MYDB_CONFIG_DIR/connections.toml` when set,
@@ -256,6 +314,11 @@ impl ConfigStore {
     /// Open a config file at an explicit path (used by tests and `--config`).
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
+        let dir = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let secrets = secrets::Store::open(dir)?;
         let file = if path.exists() {
             let text = fs::read_to_string(&path)?;
             toml::from_str(&text)
@@ -263,7 +326,11 @@ impl ConfigStore {
         } else {
             ConfigFile::default()
         };
-        Ok(Self { path, file })
+        Ok(Self {
+            path,
+            file,
+            secrets,
+        })
     }
 
     /// Open the shared config at the platform default location.
@@ -281,7 +348,7 @@ impl ConfigStore {
         &self.file.connections
     }
 
-    /// Look up a profile by exact name.
+    /// Look up a profile by exact name (password not resolved).
     pub fn get(&self, name: &str) -> Result<&ConnectionProfile> {
         self.file
             .connections
@@ -290,12 +357,34 @@ impl ConfigStore {
             .ok_or_else(|| MyDbError::ConnectionNotFound(name.to_string()))
     }
 
-    /// Add a new profile; fails when the name is taken.
-    pub fn add(&mut self, profile: ConnectionProfile) -> Result<()> {
+    /// Clone a profile and inject the secret-store password (and URL password).
+    pub fn resolved(&self, name: &str) -> Result<ConnectionProfile> {
+        let mut profile = self.get(name)?.clone();
+        if profile.password.is_none() {
+            profile.password = self.secrets.get(&profile.name)?;
+        }
+        if let Some(url) = &profile.url {
+            if let (clean, Some(pw)) = split_url_password(url) {
+                // Legacy TOML still had an embedded password; prefer discrete secret.
+                let _ = clean;
+                if profile.password.is_none() {
+                    profile.password = Some(pw);
+                }
+            } else if let Some(pw) = &profile.password {
+                profile.url = Some(inject_url_password(url, pw));
+            }
+        }
+        Ok(profile)
+    }
+
+    /// Add a new profile; fails when the name is taken. Passwords are stashed
+    /// in the keyring / encrypted file and stripped from the TOML copy.
+    pub fn add(&mut self, mut profile: ConnectionProfile) -> Result<()> {
         profile.validate()?;
         if self.file.connections.iter().any(|c| c.name == profile.name) {
             return Err(MyDbError::ConnectionExists(profile.name));
         }
+        self.stash_password(&mut profile)?;
         self.file.connections.push(profile);
         Ok(())
     }
@@ -306,6 +395,52 @@ impl ConfigStore {
         self.file.connections.retain(|c| c.name != name);
         if self.file.connections.len() == before {
             return Err(MyDbError::ConnectionNotFound(name.to_string()));
+        }
+        self.secrets.delete(name)?;
+        Ok(())
+    }
+
+    /// Saved transfer presets.
+    pub fn presets(&self) -> &[TransferPreset] {
+        &self.file.presets
+    }
+
+    /// Add or replace a preset by name.
+    pub fn upsert_preset(&mut self, preset: TransferPreset) -> Result<()> {
+        if preset.name.trim().is_empty() {
+            return Err(MyDbError::InvalidValue(
+                "preset name must not be empty".into(),
+            ));
+        }
+        self.file.presets.retain(|p| p.name != preset.name);
+        self.file.presets.push(preset);
+        Ok(())
+    }
+
+    /// Remove a preset.
+    pub fn remove_preset(&mut self, name: &str) -> Result<()> {
+        let before = self.file.presets.len();
+        self.file.presets.retain(|p| p.name != name);
+        if self.file.presets.len() == before {
+            return Err(MyDbError::InvalidValue(format!(
+                "preset '{name}' not found"
+            )));
+        }
+        Ok(())
+    }
+
+    fn stash_password(&mut self, profile: &mut ConnectionProfile) -> Result<()> {
+        if let Some(url) = profile.url.clone() {
+            let (clean, pw) = split_url_password(&url);
+            profile.url = Some(clean);
+            if let Some(pw) = pw {
+                self.secrets.set(&profile.name, &pw)?;
+                profile.password = None;
+                return Ok(());
+            }
+        }
+        if let Some(pw) = profile.password.take() {
+            self.secrets.set(&profile.name, &pw)?;
         }
         Ok(())
     }
@@ -358,10 +493,17 @@ mod tests {
         let prod = reloaded.get("prod").unwrap();
         assert_eq!(prod.kind, ProviderKind::Postgres);
         assert_eq!(prod.env, EnvironmentTag::Production);
-        assert_eq!(
-            prod.url.as_deref(),
-            Some("postgres://app:s3cret@db.example.com:5432/app")
+        assert!(
+            prod.url
+                .as_deref()
+                .unwrap()
+                .contains("postgres://app@db.example.com:5432/app"),
+            "password stripped from TOML url: {:?}",
+            prod.url
         );
+        assert!(prod.password.is_none());
+        let resolved = reloaded.resolved("prod").unwrap();
+        assert_eq!(resolved.password.as_deref(), Some("s3cret"));
 
         fs::remove_dir_all(path.parent().unwrap()).ok();
     }

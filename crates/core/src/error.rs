@@ -28,6 +28,20 @@ pub enum MyDbError {
     #[error("not yet implemented: {0}")]
     NotImplemented(String),
 
+    /// Destructive operation against a production target without confirmation.
+    #[error(
+        "destructive operation against production connection '{0}' requires confirmation (-y)"
+    )]
+    NeedsConfirmation(String),
+
+    /// An external tool (pg_dump, mysqldump, ...) could not be run.
+    #[error("tool error: {0}")]
+    Tool(String),
+
+    /// SSH tunnel failure.
+    #[error("ssh error: {0}")]
+    Ssh(String),
+
     /// A user-supplied value could not be parsed.
     #[error("invalid value: {0}")]
     InvalidValue(String),

@@ -22,7 +22,10 @@ pub mod dump;
 pub mod error;
 pub mod introspect;
 pub mod provider;
+pub mod providers;
 pub mod query;
+pub mod sql;
+pub mod ssh;
 pub mod transfer;
 
 pub use error::{MyDbError, Result};

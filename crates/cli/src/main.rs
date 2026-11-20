@@ -1,7 +1,6 @@
 //! `mydb` — the command-line companion to the MyDB Manager desktop app.
-//!
-//! Connection management works today; introspection/query land in Phase 1,
-//! dump/restore in Phase 2, transfer/diff/verify in Phase 3.
+
+mod render;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -10,9 +9,12 @@ use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
 use comfy_table::presets::UTF8_NO_BORDERS;
 use comfy_table::{Attribute, Cell, ContentArrangement, Table};
-use mydb_core::conn::{ConfigStore, ConnectionProfile, EnvironmentTag};
-use mydb_core::dump::DumpFormat;
-use mydb_core::transfer::TransferMode;
+use mydb_core::conn::{ConfigStore, ConnectionProfile, EnvironmentTag, TransferPreset};
+use mydb_core::diff::{self, diff_catalogs};
+use mydb_core::dump::{self, DumpOptions, RestoreOptions, ToolBackend};
+use mydb_core::provider::DatabaseProvider;
+use mydb_core::providers;
+use mydb_core::transfer::{self, TransferEvent, TransferOptions};
 use mydb_core::ProviderKind;
 
 #[derive(Parser)]
@@ -38,7 +40,7 @@ enum Command {
         #[command(subcommand)]
         command: ConnCommand,
     },
-    /// List database objects (tables, views, sequences, ...). [Phase 1]
+    /// List database objects (tables, views, sequences, ...).
     Ls {
         /// Connection profile name.
         conn: String,
@@ -46,7 +48,7 @@ enum Command {
         #[arg(long)]
         schema: Option<String>,
     },
-    /// Run a SQL query against a connection. [Phase 1]
+    /// Run a SQL query against a connection.
     Query {
         /// Connection profile name.
         conn: String,
@@ -75,6 +77,9 @@ enum Command {
         /// Tables to exclude (repeatable, globs allowed).
         #[arg(long)]
         exclude_table: Vec<String>,
+        /// Force a backend (`native`, `pg_dump`, `mysqldump`).
+        #[arg(long)]
+        backend: Option<String>,
     },
     /// Restore a dump into a database. [Phase 2]
     Restore {
@@ -89,6 +94,9 @@ enum Command {
         /// Show what would happen without executing.
         #[arg(long)]
         dry_run: bool,
+        /// Skip post-restore verification.
+        #[arg(long)]
+        skip_verify: bool,
     },
     /// Transfer a database from one environment to another. [Phase 3]
     Transfer {
@@ -111,6 +119,15 @@ enum Command {
         /// Skip interactive confirmation (required for production targets).
         #[arg(short = 'y', long)]
         assume_yes: bool,
+        /// Saved preset name.
+        #[arg(long)]
+        preset: Option<String>,
+        /// Skip verification.
+        #[arg(long)]
+        skip_verify: bool,
+        /// Save this transfer as a named preset.
+        #[arg(long)]
+        save_preset: Option<String>,
     },
     /// Show schema differences between two databases. [Phase 3]
     Diff {
@@ -121,6 +138,9 @@ enum Command {
         /// Print migration SQL instead of a change list.
         #[arg(long)]
         sql: bool,
+        /// Write SQL to this path (timestamped name if a directory).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
     },
     /// Verify that two databases match (objects, rows, sequences). [Phase 3]
     Verify {
@@ -137,7 +157,7 @@ enum ConnCommand {
     Add(#[command(flatten)] Box<ConnAddArgs>),
     /// List saved connection profiles.
     List,
-    /// Test connectivity to a profile. [Phase 1]
+    /// Test connectivity to a profile.
     Test {
         /// Connection profile name.
         name: String,
@@ -242,7 +262,8 @@ enum OutputFormat {
     Json,
 }
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::filter::EnvFilter::try_from_default_env()
@@ -252,49 +273,308 @@ fn main() -> ExitCode {
         .init();
 
     let cli = Cli::parse();
-    if let Err(err) = run(cli) {
+    if let Err(err) = run(cli).await {
         eprintln!("error: {err:#}");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
 }
 
-fn run(cli: Cli) -> anyhow::Result<()> {
-    let store = match &cli.config {
+async fn run(cli: Cli) -> anyhow::Result<()> {
+    let mut store = match &cli.config {
         Some(path) => ConfigStore::open(path.clone())?,
         None => ConfigStore::load_default()?,
     };
 
     match cli.command {
-        Command::Conn { command } => conn_command(command, store),
-        Command::Ls { .. } => not_yet("mydb ls", "Phase 1 (introspection)"),
-        Command::Query { .. } => not_yet("mydb query", "Phase 1 (query execution)"),
-        Command::Dump { format, .. } => {
-            // Validate user input even for stubbed commands, so scripts fail fast.
-            let _format: DumpFormat = format
-                .parse()
-                .map_err(|e: mydb_core::MyDbError| anyhow::anyhow!("{e}"))?;
-            not_yet("mydb dump", "Phase 2 (dump/restore engine)")
+        Command::Conn { command } => conn_command(command, &mut store).await,
+        Command::Ls { conn, schema } => {
+            let provider = open_provider(&store, &conn).await?;
+            let catalog = provider
+                .introspect()
+                .await
+                .with_context(|| format!("cannot introspect '{conn}'"))?;
+            print!("{}", render::catalog(&catalog, schema.as_deref()));
+            Ok(())
         }
-        Command::Restore { .. } => not_yet("mydb restore", "Phase 2 (dump/restore engine)"),
-        Command::Transfer { mode, .. } => {
-            let _mode: TransferMode = mode
-                .parse()
-                .map_err(|e: mydb_core::MyDbError| anyhow::anyhow!("{e}"))?;
-            not_yet("mydb transfer", "Phase 3 (transfer engine)")
+        Command::Query { conn, sql, format } => {
+            let provider = open_provider(&store, &conn).await?;
+            let result = provider
+                .execute_query(&sql)
+                .await
+                .with_context(|| format!("query failed on '{conn}'"))?;
+            match format {
+                OutputFormat::Table => print!("{}", render::query_table(&result)),
+                OutputFormat::Csv => print!("{}", render::query_csv(&result)),
+                OutputFormat::Json => println!("{}", render::query_json(&result)),
+            }
+            Ok(())
         }
-        Command::Diff { .. } => not_yet("mydb diff", "Phase 3 (diff engine)"),
-        Command::Verify { .. } => not_yet("mydb verify", "Phase 3 (verification)"),
+        Command::Dump {
+            conn,
+            output,
+            format,
+            schema_only,
+            clean,
+            exclude_table,
+            backend,
+        } => {
+            let profile = store.resolved(&conn)?;
+            let provider = open_provider(&store, &conn).await?;
+            let options = DumpOptions {
+                format: format
+                    .parse()
+                    .map_err(|e: mydb_core::MyDbError| anyhow::anyhow!("{e}"))?,
+                output: output.clone(),
+                schema_only,
+                clean,
+                exclude_tables: exclude_table,
+                backend: backend
+                    .as_deref()
+                    .map(|b| b.parse::<ToolBackend>())
+                    .transpose()
+                    .map_err(|e: mydb_core::MyDbError| anyhow::anyhow!("{e}"))?,
+                ..Default::default()
+            };
+            let tools = dump::detect_tools(&profile).await;
+            if tools.is_empty() {
+                eprintln!("tools: none found — using built-in engine");
+            } else {
+                for t in &tools {
+                    eprintln!("tools: {}", t.status_line());
+                }
+            }
+            let to_stdout = options.output.is_none();
+            let body = dump::dump(&profile, provider.as_ref(), options, |ev| {
+                eprint_event(&ev);
+            })
+            .await?;
+            if to_stdout {
+                print!("{body}");
+            } else {
+                println!("wrote {body}");
+            }
+            Ok(())
+        }
+        Command::Restore {
+            file,
+            into,
+            clean,
+            dry_run,
+            skip_verify,
+        } => {
+            let profile = store.resolved(&into)?;
+            let provider = open_provider(&store, &into).await?;
+            dump::restore(
+                &profile,
+                provider.as_ref(),
+                &file,
+                RestoreOptions {
+                    clean,
+                    if_exists: true,
+                    no_owner: true,
+                    dry_run,
+                    skip_verify,
+                    ..Default::default()
+                },
+                |ev| eprint_event(&ev),
+            )
+            .await?;
+            Ok(())
+        }
+        Command::Transfer {
+            source,
+            target,
+            mode,
+            exclude_table,
+            schema_only,
+            dry_run,
+            assume_yes,
+            preset,
+            skip_verify,
+            save_preset,
+        } => {
+            let (source, target, mut options) = if let Some(name) = preset {
+                let p = store
+                    .presets()
+                    .iter()
+                    .find(|p| p.name == name)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("preset '{name}' not found"))?;
+                (
+                    p.source,
+                    p.target,
+                    TransferOptions {
+                        mode: p.mode,
+                        exclude_tables: p.exclude_tables,
+                        schema_only: p.schema_only,
+                        dry_run,
+                        assume_yes,
+                        skip_verify,
+                        ..Default::default()
+                    },
+                )
+            } else {
+                (
+                    source,
+                    target,
+                    TransferOptions {
+                        mode: mode
+                            .parse()
+                            .map_err(|e: mydb_core::MyDbError| anyhow::anyhow!("{e}"))?,
+                        exclude_tables: exclude_table,
+                        schema_only,
+                        dry_run,
+                        assume_yes,
+                        skip_verify,
+                        ..Default::default()
+                    },
+                )
+            };
+            if let Some(name) = save_preset {
+                store.upsert_preset(TransferPreset {
+                    name,
+                    source: source.clone(),
+                    target: target.clone(),
+                    mode: options.mode,
+                    exclude_tables: options.exclude_tables.clone(),
+                    schema_only: options.schema_only,
+                })?;
+                store.save()?;
+            }
+            let src_profile = store.resolved(&source)?;
+            let dst_profile = store.resolved(&target)?;
+            let src = providers::connect(&src_profile).await?;
+            let dst = providers::connect(&dst_profile).await?;
+            if dry_run {
+                let src_cat = src.introspect().await?;
+                let dst_cat = dst.introspect().await?;
+                let plan = transfer::build_plan(&src_cat, &dst_cat, &options);
+                print!("{}", transfer::format_plan(&plan));
+                return Ok(());
+            }
+            let (tx, mut rx) = tokio::sync::broadcast::channel::<TransferEvent>(64);
+            let progress = tokio::spawn(async move {
+                while let Ok(ev) = rx.recv().await {
+                    eprint_event(&ev);
+                }
+            });
+            options.dry_run = dry_run;
+            let report = transfer::transfer(
+                &src_profile,
+                &dst_profile,
+                src.as_ref(),
+                dst.as_ref(),
+                options,
+                Some(tx),
+            )
+            .await?;
+            drop(progress);
+            print_report(&report);
+            if !report.passed {
+                anyhow::bail!("verification failed");
+            }
+            Ok(())
+        }
+        Command::Diff {
+            source,
+            target,
+            sql,
+            output,
+        } => {
+            let src = open_provider(&store, &source).await?;
+            let dst = open_provider(&store, &target).await?;
+            let src_cat = src.introspect().await?;
+            let dst_cat = dst.introspect().await?;
+            let diff = diff_catalogs(&src_cat, &dst_cat);
+            if diff.is_empty() {
+                println!("no differences");
+                return Ok(());
+            }
+            let body = if sql {
+                let mut script = String::from("-- generated by mydb diff; LF line endings\n");
+                script.push_str(&diff.sql());
+                if !script.ends_with('\n') {
+                    script.push('\n');
+                }
+                script
+            } else {
+                let mut out = String::new();
+                for item in &diff.items {
+                    out.push_str(&format!(
+                        "{:?} {} — {}\n",
+                        item.action,
+                        render::object_ref(item.kind, &item.schema, &item.name),
+                        item.detail
+                    ));
+                }
+                out
+            };
+            if let Some(path) = output {
+                let path = if path.is_dir() {
+                    path.join(diff::migration_filename(&source, &target))
+                } else {
+                    path
+                };
+                tokio::fs::write(&path, body.replace('\r', "").as_bytes()).await?;
+                println!("wrote {}", path.display());
+            } else {
+                print!("{body}");
+            }
+            Ok(())
+        }
+        Command::Verify { source, target } => {
+            let src = open_provider(&store, &source).await?;
+            let dst = open_provider(&store, &target).await?;
+            let report = dump::verify_providers(src.as_ref(), dst.as_ref()).await?;
+            print_report(&report);
+            if !report.passed {
+                anyhow::bail!("verification failed");
+            }
+            Ok(())
+        }
     }
 }
 
-fn not_yet(command: &str, phase: &str) -> anyhow::Result<()> {
-    Err(anyhow::anyhow!(
-        "`{command}` arrives in {phase} — the core engine is scaffolded but not wired up yet"
-    ))
+fn eprint_event(ev: &TransferEvent) {
+    if let (Some(table), Some(done), Some(total)) = (&ev.table, ev.rows_done, ev.rows_total) {
+        eprintln!("[{}] {table}: {done}/{total}", ev.kind.as_str());
+    } else {
+        eprintln!("[{}] {}", ev.kind.as_str(), ev.message);
+    }
 }
 
-fn conn_command(command: ConnCommand, mut store: ConfigStore) -> anyhow::Result<()> {
+fn print_report(report: &mydb_core::transfer::VerificationReport) {
+    println!(
+        "verification: {}",
+        if report.passed { "passed" } else { "FAILED" }
+    );
+    if !report.row_mismatches.is_empty() {
+        println!("row mismatches:");
+        for (t, s, d) in &report.row_mismatches {
+            println!("  {t}: source={s} target={d}");
+        }
+    }
+    if !report.sequence_mismatches.is_empty() {
+        println!("sequence mismatches:");
+        for (n, s, d) in &report.sequence_mismatches {
+            println!("  {n}: source={s:?} target={d:?}");
+        }
+    }
+}
+
+/// Resolve a profile by name and return a connected provider.
+async fn open_provider(
+    store: &ConfigStore,
+    name: &str,
+) -> anyhow::Result<Box<dyn DatabaseProvider>> {
+    let profile = store.resolved(name)?;
+    providers::connect(&profile)
+        .await
+        .with_context(|| format!("cannot connect to '{name}' ({})", profile.masked_target()))
+}
+
+async fn conn_command(command: ConnCommand, store: &mut ConfigStore) -> anyhow::Result<()> {
     match command {
         ConnCommand::Add(args) => {
             let ConnAddArgs {
@@ -392,9 +672,10 @@ fn conn_command(command: ConnCommand, mut store: ConfigStore) -> anyhow::Result<
             Ok(())
         }
         ConnCommand::Test { name } => {
-            // Make sure the profile exists now; actual connectivity lands in Phase 1.
-            store.get(&name)?;
-            not_yet("mydb conn test", "Phase 1 (connection pooling)")
+            let provider = open_provider(store, &name).await?;
+            let version = provider.server_version().await?;
+            println!("✓ '{name}' connected — {version}");
+            Ok(())
         }
         ConnCommand::Rm { name } => {
             store.remove(&name)?;

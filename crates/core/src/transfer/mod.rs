@@ -5,6 +5,10 @@
 //! published as [`TransferEvent`]s: the CLI renders them as progress bars,
 //! the desktop app forwards them as Tauri events.
 
+mod engine;
+
+pub use engine::{build_plan, format_plan, guard_production, transfer};
+
 use serde::{Deserialize, Serialize};
 
 use crate::introspect::{ObjectType, SchemaCatalog};
@@ -161,6 +165,26 @@ pub enum TransferEventKind {
     Warning,
     /// Terminal failure.
     Error,
+}
+
+impl TransferEventKind {
+    /// Kebab-case name for logs and CLI.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TransferEventKind::Started => "started",
+            TransferEventKind::Introspecting => "introspecting",
+            TransferEventKind::Planning => "planning",
+            TransferEventKind::PlanReady => "plan-ready",
+            TransferEventKind::Dropping => "dropping",
+            TransferEventKind::Creating => "creating",
+            TransferEventKind::Copying => "copying",
+            TransferEventKind::Sequences => "sequences",
+            TransferEventKind::Verifying => "verifying",
+            TransferEventKind::Finished => "finished",
+            TransferEventKind::Warning => "warning",
+            TransferEventKind::Error => "error",
+        }
+    }
 }
 
 /// A single progress event, streamed to CLI or UI.
