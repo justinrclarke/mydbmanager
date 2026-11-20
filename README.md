@@ -13,6 +13,8 @@ Two frontends share one Rust engine:
 
 Supports **PostgreSQL**, **MySQL/MariaDB** and **SQLite**.
 
+📖 **[Project plan](docs/PLAN.md)** · **[Milestones & progress](docs/MILESTONES.md)** · **[Contributor/AI-agent guide](AGENTS.md)**
+
 ## Architecture
 
 ```
