@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, displayValue, onTransferEvent } from "./lib/api";
+  import { envKind, envLabel, kindShort, NAV } from "./lib/ui";
   import type {
     AppInfo,
     ConnectionSummary,
@@ -17,10 +18,23 @@
   } from "./lib/types";
   import SqlEditor from "./components/SqlEditor.svelte";
   import DataGrid from "./components/DataGrid.svelte";
+  import {
+    demoCatalog,
+    demoConnections,
+    demoDiff,
+    demoInfo,
+    demoPlan,
+    demoPresets,
+    demoReport,
+    demoRows,
+    demoTools,
+    isTauriRuntime,
+  } from "./lib/demo";
 
   let info = $state<AppInfo | null>(null);
   let connections = $state<ConnectionSummary[]>([]);
   let error = $state<string | null>(null);
+  let notice = $state<string | null>(null);
   let view = $state<ViewId>("browse");
   let selected = $state<string | null>(null);
   let catalog = $state<SchemaCatalog | null>(null);
@@ -46,10 +60,72 @@
   let addUrl = $state("");
   let addKind = $state("postgres");
   let addEnv = $state("dev");
+  let schemaFilter = $state("");
+  let preview = $state(false);
+
+  const selectedConn = $derived(connections.find((c) => c.name === selected) ?? null);
+
+  const statusLeft = $derived.by(() => {
+    if (!selectedConn) return "No connection";
+    const bits = [selectedConn.name, selectedConn.kind, selectedConn.target];
+    if (selectedConn.ssh) bits.push(`ssh ${selectedConn.ssh}`);
+    return bits.join("  ·  ");
+  });
+
+  const statusRight = $derived.by(() => {
+    const bits: string[] = [];
+    if (busy) bits.push(busy);
+    if (view === "browse" && rows) bits.push(`${rows.rows.length} rows  ·  ${rows.duration}ms`);
+    if (view === "query" && queryResult) {
+      bits.push(
+        queryResult.columns.length
+          ? `${queryResult.rows.length} rows  ·  ${queryResult.duration}ms`
+          : `${queryResult.rows_affected} affected  ·  ${queryResult.duration}ms`,
+      );
+    }
+    if (info) bits.push(`v${info.appVersion}`);
+    return bits.join("  ·  ");
+  });
+
+  const filteredSchemas = $derived.by(() => {
+    if (!catalog) return [];
+    const q = schemaFilter.trim().toLowerCase();
+    if (!q) return catalog.schemas;
+    return catalog.schemas
+      .map((schema) => ({
+        ...schema,
+        tables: schema.tables.filter((t) => t.name.toLowerCase().includes(q)),
+        views: schema.views.filter((v) => v.name.toLowerCase().includes(q)),
+        sequences: schema.sequences.filter((s) => s.name.toLowerCase().includes(q)),
+        functions: schema.functions.filter((f) => f.name.toLowerCase().includes(q)),
+      }))
+      .filter(
+        (s) =>
+          s.name.toLowerCase().includes(q) ||
+          s.tables.length ||
+          s.views.length ||
+          s.sequences.length ||
+          s.functions.length,
+      );
+  });
 
   onMount(() => {
+    if (navigator.userAgent.includes("Mac")) document.documentElement.classList.add("mac");
+    if (isTauriRuntime()) document.documentElement.classList.add("tauri");
     let unlisten: (() => void) | undefined;
     (async () => {
+      if (!isTauriRuntime()) {
+        preview = true;
+        info = demoInfo;
+        connections = demoConnections;
+        presets = demoPresets;
+        selected = connections[0]?.name ?? null;
+        catalog = demoCatalog;
+        tools = demoTools;
+        xferSource = "prod-pg";
+        xferTarget = "staging-pg";
+        return;
+      }
       try {
         info = await api.appInfo();
         connections = await api.listConnections();
@@ -73,10 +149,16 @@
   async function selectConn(name: string) {
     selected = name;
     error = null;
+    notice = null;
     catalog = null;
     selectedTable = null;
     rows = null;
     tools = [];
+    if (preview) {
+      catalog = demoCatalog;
+      tools = demoTools;
+      return;
+    }
     busy = "Connecting…";
     try {
       catalog = await api.introspect(name);
@@ -91,6 +173,11 @@
   async function openTable(schema: Schema, table: Table) {
     if (!selected) return;
     selectedTable = { schema: schema.name, table };
+    view = "browse";
+    if (preview) {
+      rows = demoRows;
+      return;
+    }
     busy = "Loading rows…";
     try {
       rows = await api.fetchRows(selected, schema.name, table.name, 200, 0);
@@ -103,6 +190,10 @@
 
   async function runQuery() {
     if (!selected) return;
+    if (preview) {
+      queryResult = demoRows;
+      return;
+    }
     busy = "Running query…";
     try {
       queryResult = await api.executeSql(selected, sql);
@@ -114,11 +205,15 @@
   }
 
   async function testConn(name: string) {
+    if (preview) {
+      notice = `${name} is reachable`;
+      return;
+    }
     busy = "Testing…";
     try {
       const v = await api.testConnection(name);
       error = null;
-      alert(v);
+      notice = v;
     } catch (e) {
       error = String(e);
     } finally {
@@ -145,6 +240,11 @@
   }
 
   async function buildPlan() {
+    if (preview) {
+      plan = demoPlan;
+      view = "transfer";
+      return;
+    }
     busy = "Planning…";
     try {
       plan = await api.previewPlan(xferSource, xferTarget, {
@@ -183,6 +283,10 @@
   }
 
   async function doDiff() {
+    if (preview) {
+      diff = demoDiff;
+      return;
+    }
     busy = "Diffing…";
     try {
       diff = await api.runDiff(xferSource, xferTarget);
@@ -194,6 +298,10 @@
   }
 
   async function doVerify() {
+    if (preview) {
+      report = demoReport;
+      return;
+    }
     busy = "Verifying…";
     try {
       report = await api.runVerify(xferSource, xferTarget);
@@ -214,6 +322,7 @@
       schema_only: false,
     });
     await refresh();
+    notice = "Preset saved";
   }
 
   function applyPreset(p: TransferPreset) {
@@ -223,45 +332,27 @@
   }
 </script>
 
-<div class="layout">
-  <aside class="sidebar">
-    <div class="sidebar-header">
-      <h1>MyDB <span>Manager</span></h1>
-      {#if info}
-        <p class="version">v{info.appVersion} · core {info.coreVersion}</p>
-      {/if}
-    </div>
-
-    <h2>Connections</h2>
-    {#if error}
-      <p class="error">{error}</p>
-    {/if}
-    {#if connections.length === 0}
-      <p class="empty">No connections yet.</p>
-    {:else}
-      <ul class="connections">
-        {#each connections as conn (conn.name)}
-          <li class:active={selected === conn.name}>
-            <button class="conn" onclick={() => selectConn(conn.name)}>
-              <div class="conn-name">
-                <span>{conn.env.split(" ")[0]}</span>
-                {conn.name}
-              </div>
-              <div class="conn-target mono">{conn.kind} · {conn.target}</div>
-              {#if conn.ssh}
-                <div class="conn-ssh">ssh {conn.ssh}</div>
-              {/if}
-            </button>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-
-    <div class="side-actions">
-      <button onclick={() => (showAdd = !showAdd)}>Add connection</button>
+<div class="shell">
+  <div class="titlebar" data-tauri-drag-region>
+    <div class="app-title">MyDB Manager</div>
+    <nav class="tabs" aria-label="Views">
+      {#each NAV as item (item.id)}
+        <button class:on={view === item.id} onclick={() => (view = item.id)}>{item.label}</button>
+      {/each}
+    </nav>
+    <div class="title-actions">
       {#if selected}
         <button onclick={() => testConn(selected!)}>Test</button>
       {/if}
+    </div>
+  </div>
+
+  <aside class="sidebar">
+    <div class="side-head">
+      <span>Connections</span>
+      <button class="icon-btn" onclick={() => (showAdd = !showAdd)} title="Add connection" aria-label="Add connection">
+        {showAdd ? "−" : "+"}
+      </button>
     </div>
 
     {#if showAdd}
@@ -272,366 +363,673 @@
           addConn();
         }}
       >
-        <input placeholder="name" bind:value={addName} required />
-        <select bind:value={addKind}>
-          <option value="postgres">postgres</option>
-          <option value="mysql">mysql</option>
-          <option value="sqlite">sqlite</option>
-        </select>
-        <select bind:value={addEnv}>
-          <option value="dev">dev</option>
-          <option value="staging">staging</option>
-          <option value="prod">prod</option>
-          <option value="test">test</option>
-        </select>
-        <input placeholder="url or sqlite path" bind:value={addUrl} />
-        <button type="submit">Save</button>
+        <input placeholder="Name" bind:value={addName} required />
+        <div class="row-2">
+          <select bind:value={addKind}>
+            <option value="postgres">PostgreSQL</option>
+            <option value="mysql">MySQL</option>
+            <option value="sqlite">SQLite</option>
+          </select>
+          <select bind:value={addEnv}>
+            <option value="dev">Dev</option>
+            <option value="staging">Staging</option>
+            <option value="prod">Production</option>
+            <option value="test">Test</option>
+          </select>
+        </div>
+        <input placeholder="URL or SQLite path" bind:value={addUrl} />
+        <button type="submit" class="primary">Save</button>
       </form>
     {/if}
 
-    {#if catalog}
-      <h2>Schema</h2>
-      {#each catalog.schemas as schema (schema.name)}
-        <details open>
-          <summary>{schema.name}</summary>
-          {#each schema.tables as table (table.name)}
-            <button class="tree" onclick={() => openTable(schema, table)}>table {table.name}</button>
-          {/each}
-          {#each schema.views as v (v.name)}
-            <div class="tree dim">view {v.name}</div>
-          {/each}
-          {#each schema.sequences as s (s.name)}
-            <div class="tree dim">
-              seq {s.name} = {s.last_value ?? "-"}
-            </div>
-          {/each}
-          {#each schema.functions as f (f.name)}
-            <div class="tree dim">fn {f.name}</div>
-          {/each}
-        </details>
-      {/each}
+    {#if connections.length === 0}
+      <p class="empty">No connections. Click + to add one.</p>
+    {:else}
+      <ul class="connections">
+        {#each connections as conn (conn.name)}
+          {@const ek = envKind(conn.env)}
+          <li class:active={selected === conn.name}>
+            <button class="conn" onclick={() => selectConn(conn.name)}>
+              <span class="env-dot {ek}" title={envLabel(conn.env)}></span>
+              <span class="conn-name">{conn.name}</span>
+              <span class="kind">{kindShort(conn.kind)}</span>
+            </button>
+          </li>
+        {/each}
+      </ul>
     {/if}
 
-    {#if info}
-      <div class="config-path">
-        config: <span class="mono">{info.configPath}</span>
+    {#if catalog}
+      <div class="side-head schema-head">
+        <span>Schema</span>
+      </div>
+      <input class="filter" placeholder="Filter" bind:value={schemaFilter} />
+      <div class="tree-scroll">
+        {#each filteredSchemas as schema (schema.name)}
+          <details class="schema-group" open>
+            <summary>{schema.name}</summary>
+            {#each schema.tables as table (table.name)}
+              <button
+                class="tree"
+                class:on={selectedTable?.schema === schema.name && selectedTable?.table.name === table.name}
+                onclick={() => openTable(schema, table)}
+              >
+                {table.name}
+              </button>
+            {/each}
+            {#each schema.views as v (v.name)}
+              <div class="tree dim">{v.name}</div>
+            {/each}
+            {#each schema.sequences as s (s.name)}
+              <div class="tree dim seq">
+                {s.name}
+                <span>{s.last_value ?? "—"}</span>
+              </div>
+            {/each}
+            {#each schema.functions as f (f.name)}
+              <div class="tree dim">{f.name}()</div>
+            {/each}
+          </details>
+        {/each}
       </div>
     {/if}
   </aside>
 
-  <main>
-    <nav class="tabs">
-      <button class:on={view === "browse"} onclick={() => (view = "browse")}>Browse</button>
-      <button class:on={view === "query"} onclick={() => (view = "query")}>SQL</button>
-      <button class:on={view === "transfer"} onclick={() => (view = "transfer")}>Transfer</button>
-      <button class:on={view === "diff"} onclick={() => (view = "diff")}>Diff</button>
-      <button class:on={view === "verify"} onclick={() => (view = "verify")}>Verify</button>
-      {#if busy}
-        <span class="busy">{busy}</span>
-      {/if}
-    </nav>
+  <div class="workspace">
+    {#if error}
+      <div class="banner error" role="alert">
+        <span>{error}</span>
+        <button class="ghost" onclick={() => (error = null)}>Dismiss</button>
+      </div>
+    {/if}
+    {#if notice}
+      <div class="banner ok" role="status">
+        <span>{notice}</span>
+        <button class="ghost" onclick={() => (notice = null)}>Dismiss</button>
+      </div>
+    {/if}
 
     {#if view === "browse"}
+      <div class="toolbar">
+        {#if selectedTable}
+          <span class="path">{selectedTable.schema}.{selectedTable.table.name}</span>
+          <span class="sep">{selectedTable.table.columns.length} columns</span>
+          {#if selectedTable.table.primary_key}
+            <span class="sep">PK {selectedTable.table.primary_key.columns.join(", ")}</span>
+          {/if}
+          {#if selectedTable.table.row_estimate != null}
+            <span class="sep">~{selectedTable.table.row_estimate.toLocaleString()} rows</span>
+          {/if}
+        {:else}
+          <span class="muted">Select a table</span>
+        {/if}
+      </div>
       {#if selectedTable && rows}
-        <section>
-          <h2>{selectedTable.schema}.{selectedTable.table.name}</h2>
-          <p class="dim">
-            {selectedTable.table.columns.length} columns
-            {#if selectedTable.table.primary_key}
-              · PK {selectedTable.table.primary_key.columns.join(", ")}
-            {/if}
-            {#if selectedTable.table.row_estimate != null}
-              · ~{selectedTable.table.row_estimate} rows
-            {/if}
-          </p>
-          <pre class="ddl">{selectedTable.table.columns
-              .map((c) => `${c.name} ${c.data_type}${c.nullable ? "" : " NOT NULL"}`)
-              .join("\n")}</pre>
-          <DataGrid result={rows} />
-        </section>
+        <DataGrid result={rows} />
       {:else}
-        <section class="hero">
-          <h2>Move databases between environments — without losing anything.</h2>
-          <p>
-            Select a connection to browse tables, sequences (with current values), views,
-            functions and triggers. Transfers capture the full object graph and verify the result.
-          </p>
-        </section>
+        <div class="empty-pane">Select a table in the sidebar</div>
       {/if}
     {:else if view === "query"}
-      <section>
-        <SqlEditor bind:value={sql} onRun={runQuery} />
-        <div class="actions">
-          <button onclick={runQuery} disabled={!selected}>Run (⌘/Ctrl+Enter)</button>
+      <div class="toolbar">
+        <button class="primary" onclick={runQuery} disabled={!selected}>Run</button>
+        <span class="muted">⌘↩</span>
+      </div>
+      <div class="split">
+        <div class="split-top">
+          <SqlEditor bind:value={sql} onRun={runQuery} />
         </div>
-        {#if queryResult}
-          <DataGrid result={queryResult} />
-        {/if}
-      </section>
-    {:else if view === "transfer"}
-      <section>
-        <h2>Transfer wizard</h2>
-        <div class="form-row">
-          <label>Source <select bind:value={xferSource}>
-              <option value="">—</option>
-              {#each connections as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
-            </select></label>
-          <label>Target <select bind:value={xferTarget}>
-              <option value="">—</option>
-              {#each connections as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
-            </select></label>
-          <label>Mode <select bind:value={xferMode}>
-              <option value="clean-recreate">clean-recreate</option>
-              <option value="truncate-reload">truncate-reload</option>
-              <option value="diff-apply">diff-apply</option>
-            </select></label>
-        </div>
-        <label class="check"><input type="checkbox" bind:checked={xferYes} /> Confirm (-y)</label>
-        {#if needsPhrase()}
-          <label>Type TRANSFER <input bind:value={xferPhrase} placeholder="TRANSFER" /></label>
-        {/if}
-        {#if tools.length}
-          <p class="dim">Tools: {tools.map((t) => t.statusLine).join(" · ") || "native engine"}</p>
-        {:else if selected}
-          <p class="dim">Tools: not found — using built-in engine</p>
-        {/if}
-        <div class="actions">
-          <button onclick={buildPlan} disabled={!xferSource || !xferTarget}>Plan review</button>
-          <button onclick={executeTransfer} disabled={!plan}>Execute</button>
-          <button onclick={savePreset} disabled={!xferSource || !xferTarget}>Save preset</button>
-        </div>
-        {#if presets.length}
-          <p>Presets</p>
-          {#each presets as p (p.name)}
-            <button class="tree" onclick={() => applyPreset(p)}>{p.name}: {p.source} → {p.target}</button>
-          {/each}
-        {/if}
-        {#if plan}
-          <pre class="ddl">
-drop {plan.to_drop.length} · create {plan.to_create.length} · copy {plan.to_copy.length} tables
-{#each plan.to_copy as t (t.schema + t.table)}{t.schema}.{t.table} (~{t.est_rows})
-{/each}{#each plan.warnings as w (w)}warning: {w}
-{/each}</pre>
-        {/if}
-        {#if events.length}
-          <pre class="ddl">{events.join("\n")}</pre>
-        {/if}
-        {#if report}
-          <div class="report" class:fail={!report.passed}>
-            Verification {report.passed ? "passed" : "FAILED"}
-          </div>
-        {/if}
-      </section>
-    {:else if view === "diff"}
-      <section>
-        <h2>Schema diff</h2>
-        <div class="form-row">
-          <label>Source <select bind:value={xferSource}>
-              {#each connections as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
-            </select></label>
-          <label>Target <select bind:value={xferTarget}>
-              {#each connections as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
-            </select></label>
-        </div>
-        <button onclick={doDiff} disabled={!xferSource || !xferTarget}>Compare</button>
-        {#if diff}
-          {#if diff.items.length === 0}
-            <p>No differences.</p>
+        <div class="split-bottom">
+          {#if queryResult}
+            <DataGrid result={queryResult} />
           {:else}
-            <ul class="diff">
-              {#each diff.items as item, i (i)}
-                <li>
-                  <strong>{item.action}</strong>
-                  {item.kind} {item.schema}.{item.name} — {item.detail}
-                  {#if item.sql}<pre class="ddl">{item.sql}</pre>{/if}
-                </li>
-              {/each}
-            </ul>
+            <div class="empty-pane">Run a statement to see results</div>
           {/if}
-        {/if}
-      </section>
-    {:else if view === "verify"}
-      <section>
-        <h2>Verification report</h2>
-        <div class="form-row">
-          <label>Source <select bind:value={xferSource}>
-              {#each connections as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
-            </select></label>
-          <label>Target <select bind:value={xferTarget}>
-              {#each connections as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
-            </select></label>
         </div>
-        <button onclick={doVerify} disabled={!xferSource || !xferTarget}>Verify</button>
-        {#if report}
-          <div class="report" class:fail={!report.passed}>
-            {report.passed ? "Catalogs match" : "Mismatches found"}
-          </div>
-          {#each report.row_mismatches as [t, s, d] (t)}
-            <div>{t}: source {s} / target {d}</div>
-          {/each}
-          {#each report.sequence_mismatches as [n, s, d] (n)}
-            <div>{n}: source {displayValue(s)} / target {displayValue(d)}</div>
-          {/each}
+      </div>
+    {:else if view === "transfer"}
+      <div class="toolbar wrap">
+        <label>Source
+          <select bind:value={xferSource}>
+            <option value="">—</option>
+            {#each connections as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
+          </select>
+        </label>
+        <span class="arrow">→</span>
+        <label>Target
+          <select bind:value={xferTarget}>
+            <option value="">—</option>
+            {#each connections as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
+          </select>
+        </label>
+        <label>Mode
+          <select bind:value={xferMode}>
+            <option value="clean-recreate">Clean recreate</option>
+            <option value="truncate-reload">Truncate reload</option>
+            <option value="diff-apply">Diff apply</option>
+          </select>
+        </label>
+        <label class="check">
+          <input type="checkbox" bind:checked={xferYes} />
+          Confirm
+        </label>
+        {#if needsPhrase()}
+          <input class="phrase" bind:value={xferPhrase} placeholder="TRANSFER" />
         {/if}
-      </section>
+        <button class="primary" onclick={buildPlan} disabled={!xferSource || !xferTarget}>Plan</button>
+        <button onclick={executeTransfer} disabled={!plan}>Execute</button>
+        <button onclick={savePreset} disabled={!xferSource || !xferTarget}>Save preset</button>
+      </div>
+      {#if presets.length}
+        <div class="toolbar sub">
+          {#each presets as p (p.name)}
+            <button onclick={() => applyPreset(p)}>{p.source} → {p.target}</button>
+          {/each}
+          {#if tools.length}
+            <span class="muted">{tools.map((t) => t.statusLine).join(" · ")}</span>
+          {/if}
+        </div>
+      {/if}
+      {#if plan}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Action</th>
+                <th>Object</th>
+                <th>Rows</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each plan.to_copy as t (t.schema + t.table)}
+                <tr>
+                  <td>copy</td>
+                  <td>{t.schema}.{t.table}</td>
+                  <td class="num">~{t.est_rows.toLocaleString()}</td>
+                </tr>
+              {/each}
+              {#each plan.warnings as w (w)}
+                <tr class="warn"><td colspan="3">{w}</td></tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+        <pre class="log">{`drop ${plan.to_drop.length}  create ${plan.to_create.length}  copy ${plan.to_copy.length}  sequences ${plan.sequences_to_set.length}`}
+{#if events.length}{events.join("\n")}{/if}</pre>
+      {:else}
+        <div class="empty-pane">Choose source and target, then Plan</div>
+      {/if}
+      {#if report}
+        <div class="report" class:fail={!report.passed}>
+          Verification {report.passed ? "passed" : "failed"}
+        </div>
+      {/if}
+    {:else if view === "diff"}
+      <div class="toolbar">
+        <label>Source
+          <select bind:value={xferSource}>
+            {#each connections as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
+          </select>
+        </label>
+        <span class="arrow">→</span>
+        <label>Target
+          <select bind:value={xferTarget}>
+            {#each connections as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
+          </select>
+        </label>
+        <button class="primary" onclick={doDiff} disabled={!xferSource || !xferTarget}>Compare</button>
+      </div>
+      {#if diff}
+        {#if diff.items.length === 0}
+          <div class="empty-pane">No differences</div>
+        {:else}
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Action</th>
+                  <th>Kind</th>
+                  <th>Object</th>
+                  <th>Detail</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each diff.items as item, i (i)}
+                  <tr>
+                    <td>{item.action}</td>
+                    <td>{item.kind}</td>
+                    <td>{item.schema}.{item.name}</td>
+                    <td>{item.detail}</td>
+                  </tr>
+                  {#if item.sql}
+                    <tr><td colspan="4"><pre class="sql">{item.sql}</pre></td></tr>
+                  {/if}
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+      {:else}
+        <div class="empty-pane">Compare two connections</div>
+      {/if}
+    {:else if view === "verify"}
+      <div class="toolbar">
+        <label>Source
+          <select bind:value={xferSource}>
+            {#each connections as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
+          </select>
+        </label>
+        <span class="arrow">→</span>
+        <label>Target
+          <select bind:value={xferTarget}>
+            {#each connections as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
+          </select>
+        </label>
+        <button class="primary" onclick={doVerify} disabled={!xferSource || !xferTarget}>Verify</button>
+      </div>
+      {#if report}
+        <div class="report" class:fail={!report.passed}>
+          {report.passed ? "Catalogs match" : "Mismatches found"}
+        </div>
+        {#if report.row_mismatches.length || report.sequence_mismatches.length}
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Object</th>
+                  <th>Source</th>
+                  <th>Target</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each report.row_mismatches as [t, s, d] (t)}
+                  <tr><td>{t}</td><td class="num">{s}</td><td class="num">{d}</td></tr>
+                {/each}
+                {#each report.sequence_mismatches as [n, s, d] (n)}
+                  <tr>
+                    <td>{n}</td>
+                    <td class="num">{displayValue(s)}</td>
+                    <td class="num">{displayValue(d)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+      {:else}
+        <div class="empty-pane">Verify source against target</div>
+      {/if}
     {/if}
-  </main>
+  </div>
+
+  <footer class="statusbar">
+    <span>{statusLeft}</span>
+    <span>{statusRight}</span>
+  </footer>
 </div>
 
 <style>
-  .layout {
+  .shell {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    grid-template-rows: 38px 1fr 22px;
+    height: 100%;
+    background: var(--bg);
+  }
+  .titlebar {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: 220px 1fr auto;
+    align-items: center;
+    background: var(--bg-title);
+    border-bottom: 1px solid #000;
+    padding: 0 10px 0 12px;
+    -webkit-app-region: drag;
+  }
+  :global(html.mac.tauri) .titlebar {
+    padding-left: 78px;
+    grid-template-columns: 160px 1fr auto;
+  }
+  .app-title {
+    font-weight: 600;
+    font-size: 13px;
+    pointer-events: none;
+  }
+  .title-actions {
+    display: flex;
+    gap: 6px;
+    -webkit-app-region: no-drag;
+  }
+  .tabs {
     display: flex;
     height: 100%;
+    -webkit-app-region: no-drag;
+  }
+  .tabs button {
+    height: 100%;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    padding: 0 14px;
+    color: var(--text-dim);
+    border-bottom: 2px solid transparent;
+  }
+  .tabs button:hover:not(:disabled) {
+    background: transparent;
+    color: var(--text);
+  }
+  .tabs button.on {
+    color: var(--text);
+    background: #3a3a3c;
+    border-bottom-color: var(--accent);
   }
   .sidebar {
-    width: 300px;
-    min-width: 300px;
-    background: var(--bg-panel);
-    border-right: 1px solid var(--border);
-    padding: 16px;
+    grid-row: 2;
+    background: var(--bg-sidebar);
+    border-right: 1px solid #000;
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    overflow: auto;
+    min-height: 0;
+    overflow: hidden;
+    resize: horizontal;
   }
-  .sidebar-header h1 {
-    margin: 0;
-    font-size: 20px;
+  .side-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 8px 4px;
+    color: var(--text-faint);
+    font-size: 11px;
+    font-weight: 600;
   }
-  .sidebar-header span {
-    color: var(--accent);
+  .schema-head {
+    border-top: 1px solid #000;
+    margin-top: 6px;
   }
-  .version,
-  .dim,
-  .config-path,
-  .empty,
-  .conn-target,
-  .conn-ssh {
-    color: var(--text-dim);
-    font-size: 12px;
-  }
-  h2 {
-    font-size: 13px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-dim);
-    margin: 12px 0 4px;
+  .icon-btn {
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    line-height: 16px;
   }
   .connections {
     list-style: none;
     margin: 0;
-    padding: 0;
+    padding: 0 4px;
   }
   .conn {
     width: 100%;
-    text-align: left;
-    background: transparent;
-    border: none;
-    padding: 8px;
-  }
-  li.active .conn,
-  .conn:hover {
-    background: var(--bg-raised);
-  }
-  .tree {
-    display: block;
-    width: 100%;
-    text-align: left;
-    background: transparent;
-    border: none;
-    padding: 4px 8px;
-    font-size: 12px;
-  }
-  .tree.dim {
-    color: var(--text-dim);
-  }
-  .error {
-    color: #f87171;
-    font-size: 12px;
-  }
-  main {
-    flex: 1;
-    overflow: auto;
-    padding: 20px 28px;
-  }
-  .tabs {
+    height: 24px;
     display: flex;
-    gap: 8px;
-    margin-bottom: 16px;
     align-items: center;
+    gap: 6px;
+    text-align: left;
+    background: transparent;
+    border: none;
+    padding: 0 6px;
+    border-radius: 4px;
   }
-  .tabs button.on {
-    border-color: var(--accent);
-    color: var(--accent);
+  li.active .conn {
+    background: var(--bg-selected);
+    color: #fff;
   }
-  .busy {
-    color: var(--accent);
-    font-size: 12px;
+  .conn-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-  .hero h2 {
-    text-transform: none;
-    font-size: 28px;
-    color: var(--text);
-    letter-spacing: 0;
+  .kind {
+    color: var(--text-faint);
+    font-size: 10px;
+    font-variant: all-small-caps;
   }
-  .actions {
-    display: flex;
-    gap: 8px;
-    margin: 12px 0;
+  li.active .kind {
+    color: rgba(255, 255, 255, 0.7);
   }
-  .form-row {
-    display: flex;
-    gap: 16px;
-    flex-wrap: wrap;
-    margin-bottom: 12px;
+  .env-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 99px;
+    background: var(--text-faint);
+    flex-shrink: 0;
   }
-  label {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    font-size: 12px;
+  .env-dot.prod {
+    background: var(--prod);
+  }
+  .env-dot.staging {
+    background: var(--staging);
+  }
+  .env-dot.dev {
+    background: var(--dev);
+  }
+  .env-dot.test {
+    background: var(--test);
+  }
+  .empty {
     color: var(--text-dim);
-  }
-  input,
-  select {
-    font: inherit;
-    background: var(--bg-raised);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 6px 8px;
-  }
-  .ddl {
-    background: var(--bg-raised);
-    padding: 12px;
-    border-radius: 8px;
-    overflow: auto;
-    font-size: 12px;
-  }
-  .report {
-    margin-top: 12px;
-    padding: 12px;
-    border-radius: 8px;
-    background: #134e4a;
-  }
-  .report.fail {
-    background: #7f1d1d;
+    font-size: 11px;
+    padding: 4px 10px;
+    margin: 0;
   }
   .add-form {
     display: flex;
     flex-direction: column;
     gap: 6px;
+    padding: 4px 8px 8px;
   }
-  .side-actions {
-    display: flex;
+  .row-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
     gap: 6px;
   }
-  .diff {
-    padding-left: 16px;
+  .filter {
+    margin: 0 8px 6px;
+    width: calc(100% - 16px);
   }
-  .check {
-    flex-direction: row;
+  .tree-scroll {
+    flex: 1;
+    overflow: auto;
+    padding: 0 4px 8px;
+  }
+  .schema-group {
+    margin: 0;
+  }
+  .schema-group summary {
+    cursor: default;
+    padding: 3px 6px;
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .tree {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    height: 20px;
+    text-align: left;
+    background: transparent;
+    border: none;
+    padding: 0 6px 0 18px;
+    font-size: 12px;
+    border-radius: 3px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tree:hover {
+    background: var(--bg-hover);
+  }
+  .tree.on {
+    background: var(--bg-selected);
+    color: #fff;
+  }
+  .tree.dim {
+    color: var(--text-dim);
+  }
+  .tree.seq span {
+    margin-left: auto;
+    color: var(--text-faint);
+    font-family: var(--mono);
+    font-size: 10px;
+  }
+  .workspace {
+    grid-row: 2;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    background: var(--bg-content);
+  }
+  .toolbar {
+    display: flex;
     align-items: center;
     gap: 8px;
+    min-height: 32px;
+    padding: 0 8px;
+    background: var(--bg-toolbar);
+    border-bottom: 1px solid #000;
+    flex-shrink: 0;
+  }
+  .toolbar.wrap {
+    flex-wrap: wrap;
+    padding: 4px 8px;
+    gap: 6px 10px;
+  }
+  .toolbar.sub {
+    background: #323234;
+  }
+  .toolbar label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .toolbar .check {
+    color: var(--text);
+  }
+  .path {
+    font-weight: 600;
+    font-family: var(--mono);
+  }
+  .sep,
+  .muted {
+    color: var(--text-dim);
+  }
+  .arrow {
+    color: var(--text-faint);
+  }
+  .phrase {
+    width: 110px;
+  }
+  .banner {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 8px;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  .banner.error {
+    background: #5c1210;
+    color: #ffd4d1;
+  }
+  .banner.ok {
+    background: #0d3d16;
+    color: #c6f5ce;
+  }
+  .empty-pane {
+    flex: 1;
+    display: grid;
+    place-items: center;
+    color: var(--text-faint);
+  }
+  .split {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: minmax(140px, 38%) 1fr;
+  }
+  .split-top {
+    min-height: 0;
+    border-bottom: 1px solid #000;
+  }
+  .split-bottom {
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .table-wrap {
+    flex: 1;
+    overflow: auto;
+    min-height: 0;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  th,
+  td {
+    text-align: left;
+    padding: 4px 8px;
+    border-bottom: 1px solid #2a2a2c;
+    user-select: text;
+  }
+  th {
+    position: sticky;
+    top: 0;
+    background: #3a3a3c;
+    color: var(--text-dim);
+    font-weight: 600;
+    border-bottom: 1px solid #000;
+  }
+  td.num {
+    font-family: var(--mono);
+    text-align: right;
+  }
+  tr.warn td {
+    color: var(--warn);
+  }
+  .sql,
+  .log {
+    margin: 0;
+    padding: 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    background: #161618;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    user-select: text;
+  }
+  .report {
+    padding: 6px 8px;
+    background: #0d3d16;
+    color: #c6f5ce;
+    flex-shrink: 0;
+  }
+  .report.fail {
+    background: #5c1210;
+    color: #ffd4d1;
+  }
+  .statusbar {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 8px;
+    background: var(--bg-title);
+    border-top: 1px solid #000;
+    color: var(--text-dim);
+    font-size: 11px;
+    overflow: hidden;
+    white-space: nowrap;
+    gap: 12px;
+  }
+  .statusbar span {
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 </style>

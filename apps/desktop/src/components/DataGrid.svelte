@@ -16,8 +16,8 @@
     const virtualizer = createVirtualizer({
       count,
       getScrollElement: () => el,
-      estimateSize: () => 32,
-      overscan: 16,
+      estimateSize: () => 24,
+      overscan: 24,
     });
     const unsub = virtualizer.subscribe((vz) => {
       items = vz.getVirtualItems();
@@ -28,17 +28,21 @@
 </script>
 
 {#if result.columns.length === 0}
-  <p class="ok">OK ({result.rows_affected} rows affected, {result.duration}ms)</p>
+  <div class="ok">OK — {result.rows_affected} rows affected ({result.duration}ms)</div>
 {:else}
   <div class="grid" bind:this={parent}>
-    <div class="head">
+    <div class="head" style="grid-template-columns: repeat({result.columns.length}, minmax(120px, 1fr));">
       {#each result.columns as col (col.name)}
-        <span>{col.name}</span>
+        <span title={col.type_name}>{col.name}</span>
       {/each}
     </div>
     <div class="body" style="height: {total}px;">
       {#each items as item (item.key)}
-        <div class="row" style="transform: translateY({item.start}px);">
+        <div
+          class="row"
+          class:alt={item.index % 2 === 1}
+          style="transform: translateY({item.start}px); grid-template-columns: repeat({result.columns.length}, minmax(120px, 1fr));"
+        >
           {#each result.rows[item.index] ?? [] as cell, i (`${item.index}-${i}`)}
             <span class:nullish={displayValue(cell) === "NULL"}>{displayValue(cell)}</span>
           {/each}
@@ -51,33 +55,36 @@
 <style>
   .ok {
     color: var(--text-dim);
+    padding: 8px 10px;
   }
   .grid {
     overflow: auto;
-    max-height: min(60vh, 520px);
-    border: 1px solid var(--border);
-    border-radius: 8px;
+    flex: 1;
+    min-height: 0;
+    background: var(--bg-content);
   }
   .head,
   .row {
     display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: minmax(140px, 1fr);
     font-size: 12px;
   }
   .head {
     position: sticky;
     top: 0;
-    background: var(--bg-panel);
+    background: #3a3a3c;
     color: var(--text-dim);
     z-index: 1;
+    border-bottom: 1px solid #000;
+    font-weight: 600;
   }
   .head span,
   .row span {
-    padding: 8px 10px;
+    padding: 4px 8px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    border-right: 1px solid #3a3a3c;
+    user-select: text;
   }
   .body {
     position: relative;
@@ -86,12 +93,17 @@
     position: absolute;
     left: 0;
     right: 0;
-    height: 32px;
-    border-bottom: 1px solid var(--border);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    height: 24px;
+    font-family: var(--mono);
+    font-size: 11px;
+    border-bottom: 1px solid #2a2a2c;
+  }
+  .row.alt {
+    background: #242426;
   }
   .nullish {
-    color: var(--text-dim);
+    color: var(--text-faint);
     font-style: italic;
+    font-family: var(--font);
   }
 </style>
